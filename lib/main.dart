@@ -14,6 +14,11 @@ import 'package:flutter/foundation.dart';
 // Import necesar pentru StreamSubscription
 import 'dart:async';
 
+// Import pentru permisiuni
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:io' show Platform; // Pentru a verifica dacă e Android
+
+
 void main() async {
   // Asigură inițializarea înainte de a rula Firebase
   WidgetsFlutterBinding.ensureInitialized();
@@ -556,7 +561,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-// ------------------- PAGINA PRINCIPALĂ (MODIFICATĂ PENTRU CONECTARE BLUETOOTH) -------------------
+// ------------------- PAGINA PRINCIPALĂ (CU TOATE CORECȚIILE) -------------------
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
   final String title;
@@ -566,87 +571,240 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  // --- Variabile noi pentru a gestiona starea conexiunii ---
+  // --- Variabilele de conexiune ---
   BluetoothDevice? connectedDevice;
   StreamSubscription<BluetoothConnectionState>? connectionSubscription;
   BluetoothConnectionState connectionState = BluetoothConnectionState.disconnected;
 
+  // --- Variabile pentru controlul BLE ---
+  BluetoothCharacteristic? writeCharacteristic;
+  StreamSubscription? _characteristicSubscription; // Pentru a asculta date
+  final Guid serviceUuid = Guid("0000ffe0-0000-1000-8000-00805f9b34fb");
+  final Guid characteristicUuid = Guid("0000ffe1-0000-1000-8000-00805f9b34fb");
+
+  // --- Variabile de Stare (Becul ȘI Modul) ---
+  bool _esteBeculAprins = false;
+  bool _esteModulAuto = false;
+
+  // --- Variabilă pentru a ști dacă permisiunile sunt gata ---
+  bool _permissionsGranted = false;
+
+
+  // --- Funcție care rulează la început ---
+  @override
+  void initState() {
+    super.initState();
+    _checkPermissions();
+  }
+
+  // --- Funcție care cere permisiunile ---
+  Future<void> _checkPermissions() async {
+    if (Platform.isAndroid) {
+      var bluetoothScanStatus = await Permission.bluetoothScan.request();
+      var bluetoothConnectStatus = await Permission.bluetoothConnect.request();
+      var locationStatus = await Permission.location.request();
+
+      if (bluetoothScanStatus.isGranted &&
+          bluetoothConnectStatus.isGranted &&
+          locationStatus.isGranted) {
+        setState(() {
+          _permissionsGranted = true;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Permisiunile de Bluetooth și Locație sunt necesare pentru a scana.'),
+              backgroundColor: Colors.red,
+            )
+        );
+      }
+    } else {
+      // Pentru iOS, presupunem că sunt ok deocamdată
+      setState(() {
+        _permissionsGranted = true;
+      });
+    }
+  }
+
+
   @override
   void dispose() {
-    // Anulează abonamentul și deconectează-te la părăsirea paginii
+    // Anulăm abonamentele și ne deconectăm
+    _characteristicSubscription?.cancel();
     connectionSubscription?.cancel();
-    connectedDevice?.disconnect();
+    connectedDevice?.disconnect(); // Trimitem comanda de deconectare
     super.dispose();
   }
 
-  // --- Funcție nouă pentru a gestiona erorile de conectare ---
   void _handleConnectionError(dynamic e) {
     ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Eroare la conectare: $e'), backgroundColor: Colors.red)
     );
-    _disconnectFromDevice(); // Resetează interfața
+    _cleanupConnectionState(); // Curățăm starea
   }
 
-  // --- Funcție nouă pentru a te CONECTA la un dispozitiv ---
-// În interiorul clasei _MyHomePageState
+  // --- Funcția de trimitere comenzi (CU CORECȚIA PENTRU EROARE) ---
+  Future<void> _sendCommand(String command) async {
+    if (writeCharacteristic == null) {
+      print('Caracteristica de scris nu e gata.');
+      return;
+    }
+    try {
+      List<int> bytes = (command + '\n').codeUnits;
 
-// --- Funcția ta _connectToDevice, rescrisă ---
-  void _connectToDevice(BluetoothDevice device) async { // <-- PASUL 1: Am adăugat 'async'
-    // Oprește scanarea
+      // --- CORECȚIE AICI ---
+      // Am scos ", withoutResponse: true"
+      await writeCharacteristic!.write(bytes);
+
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Eroare la trimiterea comenzii: $e'), backgroundColor: Colors.red)
+      );
+    }
+  }
+
+  // --- Funcție care procesează datele primite de la Arduino ---
+  void _handleArduinoData(String data) {
+    if (data.isEmpty) return;
+
+    print("Primit de la Arduino: $data"); // PENTRU DEBUG
+
+    // Uneori Arduino poate trimite mai multe mesaje odată (ex: "STATUS,BEC,1\nSTATUS,MOD,0")
+    List<String> messages = data.split(RegExp(r'[\r\n]+'));
+
+    // Folosim un 'for' în caz că vin mesaje lipite
+    for (var msg in messages) {
+      if (msg.isEmpty) continue;
+
+      if (msg.startsWith("STATUS,BEC,")) {
+        String val = msg.substring(11); // Ia ce e după "STATUS,BEC,"
+        setState(() { _esteBeculAprins = (val == "1"); });
+      }
+      else if (msg.startsWith("STATUS,MOD,")) {
+        String val = msg.substring(11); // Ia ce e după "STATUS,MOD,"
+        setState(() { _esteModulAuto = (val == "1"); });
+      }
+    }
+  }
+
+  // --- Funcția de descoperire servicii ---
+  Future<void> _discoverServices(BluetoothDevice device) async {
+    try {
+      List<BluetoothService> services = await device.discoverServices();
+
+      // Căutăm serviciul nostru specific (FFE0)
+      BluetoothService? targetService;
+      for (var service in services) {
+        if (service.uuid == serviceUuid) {
+          targetService = service;
+          break;
+        }
+      }
+      if (targetService == null) throw 'Serviciul BLE (FFE0) nu a fost găsit.';
+
+      // Căutăm caracteristica noastră specifică (FFE1)
+      BluetoothCharacteristic? targetCharacteristic;
+      for (var char in targetService.characteristics) {
+        if (char.uuid == characteristicUuid) {
+          targetCharacteristic = char;
+          break;
+        }
+      }
+      if (targetCharacteristic == null) throw 'Caracteristica BLE (FFE1) nu a fost găsită.';
+
+      setState(() {
+        writeCharacteristic = targetCharacteristic;
+      });
+
+      // Abonează-te la notificări
+      final canNotify = targetCharacteristic.properties.notify;
+      if (canNotify) {
+        await targetCharacteristic.setNotifyValue(true);
+
+        _characteristicSubscription?.cancel(); // Anulează orice ascultare veche
+
+        _characteristicSubscription = targetCharacteristic.lastValueStream.listen((value) {
+          String dataDeLaArduino = String.fromCharCodes(value);
+          _handleArduinoData(dataDeLaArduino.trim());
+        }, onError: (e) {
+          print("Eroare la ascultare: $e");
+          _handleConnectionError("Eroare la ascultarea datelor BLE.");
+        });
+      }
+
+    } catch (e) {
+      _handleConnectionError(e);
+    }
+  }
+
+  // --- Funcție separată pentru curățarea stării ---
+  void _cleanupConnectionState() {
+    _characteristicSubscription?.cancel();
+    connectionSubscription?.cancel();
+    _characteristicSubscription = null;
+    connectionSubscription = null;
+    setState(() {
+      connectedDevice = null;
+      connectionState = BluetoothConnectionState.disconnected;
+      writeCharacteristic = null;
+      _esteBeculAprins = false;
+      _esteModulAuto = false;
+    });
+  }
+
+  // --- Funcția de CONECTARE ---
+  void _connectToDevice(BluetoothDevice device) async {
     FlutterBluePlus.stopScan();
-
-    // Setează starea imediat pentru a afișa UI-ul de "conectare..."
     setState(() {
       connectedDevice = device;
       connectionState = BluetoothConnectionState.connecting;
+      writeCharacteristic = null;
     });
 
-    // Abonează-te la schimbările de stare ale conexiunii
     connectionSubscription = device.connectionState.listen((state) {
-      setState(() {
-        connectionState = state;
-      });
+      setState(() { connectionState = state; });
       if (state == BluetoothConnectionState.disconnected) {
-        // Dispozitivul s-a deconectat singur
-        _disconnectFromDevice(); // Curăță starea
+        _cleanupConnectionState();
       }
     }, onError: (e) {
       _handleConnectionError(e);
     });
 
-    // --- PASUL 2: Aici este blocul de cod rescris ---
-    // Am înlocuit .catchError() cu un bloc try/catch
     try {
-      // Încearcă să te conectezi (cu un timeout de 15 secunde)
       await device.connect(timeout: const Duration(seconds: 15));
+      await Future.delayed(const Duration(milliseconds: 500)); // Pauză de stabilizare
+
+      if (connectionState == BluetoothConnectionState.connected) {
+        await _discoverServices(device);
+      }
     } catch (e) {
-      // Dacă apare orice eroare în timpul conectării, o prindem
       _handleConnectionError(e);
     }
   }
 
-  // --- Funcție nouă pentru a te DECONECTA de la un dispozitiv ---
+  // --- Funcția de DECONECTARE ---
   void _disconnectFromDevice() {
-    connectionSubscription?.cancel();
-    connectionSubscription = null;
     connectedDevice?.disconnect();
-    setState(() {
-      connectedDevice = null;
-      connectionState = BluetoothConnectionState.disconnected;
-    });
+    _cleanupConnectionState();
   }
 
-  // --- Funcție nouă pentru a ÎNCEPE scanarea ---
+  // --- Funcțiile de Scanare ---
   void scanDevices() {
+    if (!_permissionsGranted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Acordă permisiunile de Locație și Bluetooth mai întâi.'),
+            backgroundColor: Colors.red,
+          )
+      );
+      _checkPermissions(); // Cere-le din nou
+      return;
+    }
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
   }
+  void stopScan() { FlutterBluePlus.stopScan(); }
 
-  // --- Funcție nouă pentru a OPRI scanarea ---
-  void stopScan() {
-    FlutterBluePlus.stopScan();
-  }
-
-  // --- Widget nou: Interfața pentru când Bluetooth este OPRIT ---
+  // --- Widget-ul: Interfața Bluetooth OPRIT ---
   Widget _buildBluetoothOffUI() {
     return Center(
       child: Column(
@@ -657,7 +815,7 @@ class _MyHomePageState extends State<MyHomePage> {
           const Text('Bluetooth este Oprit', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           Text(
-            'Te rog pornește Bluetooth-ul și Locația\npentru a scana după dispozitive.',
+            'Te rog pornește Bluetooth-ul.',
             style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
             textAlign: TextAlign.center,
           ),
@@ -666,8 +824,36 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Widget nou: Interfața pentru a SCANA dispozitive ---
+  // --- Widget-ul: Interfața de SCANARE ---
   Widget _buildScanUI() {
+    if (!_permissionsGranted) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.lock_outline, size: 80, color: Colors.grey.shade600),
+              const SizedBox(height: 16),
+              const Text('Permisiuni Necsare', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Text(
+                'Aplicația are nevoie de permisiuni de "Locație" și "Dispozitive din apropiere" pentru a scana după module BLE.',
+                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                  onPressed: _checkPermissions,
+                  child: const Text('Acordă Permisiunile')
+              )
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Altfel, arată interfața de scanare normală
     return Column(
       children: [
         StreamBuilder<bool>(
@@ -702,7 +888,6 @@ class _MyHomePageState extends State<MyHomePage> {
                     subtitle: Text(r.device.remoteId.toString()),
                     leading: const Icon(Icons.bluetooth),
                     trailing: Text('${r.rssi} dBm'),
-                    // --- MODIFICARE AICI: Apelează funcția de conectare la apăsare ---
                     onTap: () => _connectToDevice(r.device),
                   );
                 },
@@ -714,38 +899,130 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Widget nou: Interfața pentru dispozitivul CONECTAT ---
+  // --- Widget-ul: Interfața pentru dispozitivul CONECTAT ---
   Widget _buildConnectedDeviceUI() {
     String deviceName = connectedDevice!.platformName.isNotEmpty
         ? connectedDevice!.platformName
         : 'Dispozitiv Necunoscut';
 
-    bool isConnected = (connectionState == BluetoothConnectionState.connected);
+    bool isConnecting = (connectionState == BluetoothConnectionState.connecting);
+    bool isReady = (connectionState == BluetoothConnectionState.connected) && (writeCharacteristic != null);
 
-    return Center(
+    return SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(isConnected ? 'Conectat la:' : 'Se conectează la:',
-                style: const TextStyle(fontSize: 22)),
+            const SizedBox(height: 16),
+            Text(isReady ? 'Conectat la:' : (isConnecting ? 'Se conectează la:' : 'Eroare la conectare'),
+                style: const TextStyle(fontSize: 22), textAlign: TextAlign.center),
             const SizedBox(height: 8),
             Text(deviceName,
-                style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 32),
+                style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+            const SizedBox(height: 24),
 
-            // Arată un indicator de progres doar în timpul conectării
-            if (connectionState == BluetoothConnectionState.connecting)
-              const CircularProgressIndicator(),
+            if (isConnecting)
+              const Center(child: CircularProgressIndicator()),
 
-            // Arată un mesaj de succes la conectare
-            if (isConnected)
-              const Text('Dispozitiv conectat cu succes!',
-                  style: TextStyle(fontSize: 18, color: Colors.green)),
+            if (connectionState == BluetoothConnectionState.connected && writeCharacteristic == null && !isConnecting)
+              const Center(
+                child: Text('Conectat, dar nu am putut găsi serviciul de control (FFE1).',
+                    style: TextStyle(fontSize: 16, color: Colors.red), textAlign: TextAlign.center),
+              ),
 
-            const SizedBox(height: 32),
+            // ----- AICI ESTE PANOU DE CONTROL -----
+            if (isReady)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('Panou de Control:',
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+
+                  // --- Controlul Modului Auto ---
+                  Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: _esteModulAuto ? Colors.blue.shade100 : Colors.grey.shade200,
+                    ),
+                    child: SwitchListTile(
+                      title: Text(
+                        _esteModulAuto ? 'Mod Auto Activat' : 'Mod Auto Oprit',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: const Text('Controlat de senzor/butonul fizic'),
+                      value: _esteModulAuto,
+
+                      // --- CORECȚIE AICI (Fără setState) ---
+                      onChanged: (newValue) {
+                        if (newValue) {
+                          _sendCommand("MOD,AUTO,ON");
+                        } else {
+                          _sendCommand("MOD,AUTO,OFF");
+                        }
+                        // AM ȘTERS setState de aici
+                      },
+
+                      secondary: Icon(
+                        _esteModulAuto ? Icons.sensors : Icons.sensors_off,
+                        size: 40,
+                        color: _esteModulAuto ? Colors.blue : Colors.grey,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // --- Controlul Manual ---
+                  Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: _esteBeculAprins ? Colors.yellow.shade100 : Colors.grey.shade200,
+                      border: Border.all(
+                          color: _esteModulAuto ? Colors.grey.shade400 : Colors.transparent,
+                          width: 1
+                      ),
+                    ),
+                    child: SwitchListTile(
+                      title: Text(
+                        _esteBeculAprins ? 'Becul este Aprins' : 'Becul este Stins',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: _esteModulAuto ? Colors.grey.shade600 : Colors.black,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _esteModulAuto ? 'Dezactivați Modul Auto pentru control' : 'Control manual',
+                        style: TextStyle(
+                          color: _esteModulAuto ? Colors.grey.shade600 : Colors.black54,
+                        ),
+                      ),
+                      value: _esteBeculAprins,
+
+                      // --- CORECȚIE AICI (Fără setState) ---
+                      onChanged: _esteModulAuto ? null : (newValue) {
+                        if (newValue) {
+                          _sendCommand("BEC,ON");
+                        } else {
+                          _sendCommand("BEC,OFF");
+                        }
+                        // AM ȘTERS setState de aici
+                      },
+
+                      secondary: Icon(
+                        _esteBeculAprins ? Icons.lightbulb : Icons.lightbulb_outline,
+                        size: 40,
+                        color: _esteBeculAprins ? Colors.orange : Colors.grey,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+            const SizedBox(height: 48),
 
             // Butonul de deconectare
             ElevatedButton(
@@ -753,7 +1030,7 @@ class _MyHomePageState extends State<MyHomePage> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                padding: const EdgeInsets.symmetric(vertical: 16),
               ),
               child: const Text('Deconectare', style: TextStyle(fontSize: 16)),
             ),
@@ -763,7 +1040,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Widget nou: Butonul de scanare (separat) ---
+  // --- Widget-ul: Butonul de scanare ---
   Widget _buildScanButton() {
     return StreamBuilder<bool>(
       stream: FlutterBluePlus.isScanning,
@@ -800,7 +1077,6 @@ class _MyHomePageState extends State<MyHomePage> {
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
             onPressed: () {
-              // Verifică dacă e conectat și se deconectează înainte de logout
               if (connectedDevice != null) {
                 _disconnectFromDevice();
               }
@@ -814,35 +1090,31 @@ class _MyHomePageState extends State<MyHomePage> {
         ],
       ),
 
-      // --- MODIFICARE AICI: Corpul paginii se schimbă în funcție de stare ---
+      // --- Corpul paginii ---
       body: StreamBuilder<BluetoothAdapterState>(
         stream: FlutterBluePlus.adapterState,
         initialData: BluetoothAdapterState.unknown,
         builder: (context, snapshot) {
           final state = snapshot.data;
           if (state != BluetoothAdapterState.on) {
-            // 1. Dacă Bluetooth e OPRIT, arată ecranul de eroare
             return _buildBluetoothOffUI();
           }
           if (connectedDevice != null) {
-            // 2. Dacă un dispozitiv e selectat/conectat, arată ecranul de conectare
             return _buildConnectedDeviceUI();
           }
-          // 3. Altfel, arată ecranul de scanare
           return _buildScanUI();
         },
       ),
 
-      // --- MODIFICARE AICI: Arată butonul de scanare doar dacă nu ești conectat ---
+      // --- Butonul de scanare ---
       floatingActionButton: StreamBuilder<BluetoothAdapterState>(
         stream: FlutterBluePlus.adapterState,
         initialData: BluetoothAdapterState.unknown,
         builder: (context, snapshot) {
           if (snapshot.data == BluetoothAdapterState.on && connectedDevice == null) {
-            // Arată butonul doar dacă BT e pornit ȘI nu suntem conectați
             return _buildScanButton();
           }
-          return Container(); // Nu arăta niciun buton altfel
+          return Container();
         },
       ),
     );
