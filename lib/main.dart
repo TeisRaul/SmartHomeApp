@@ -6,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'firebase_options.dart'; // Fișierul generat de 'flutterfire configure'
+import 'package:shared_preferences/shared_preferences.dart';
 
 // Importul pentru Bluetooth
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -17,6 +18,9 @@ import 'dart:async';
 // Import pentru permisiuni
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:io' show Platform; // Pentru a verifica dacă e Android
+
+// --- IMPORT NOU PENTRU ROATA DE CULORI ---
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 
 void main() async {
@@ -374,6 +378,25 @@ class _LoginPageState extends State<LoginPage> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _rememberMe = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserCredentials();
+  }
+
+  // Funcție care verifică dacă există un user salvat
+  void _loadUserCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _rememberMe = prefs.getBool('remember_me') ?? false;
+      if (_rememberMe) {
+        _usernameController.text = prefs.getString('saved_username') ?? '';
+      }
+    });
+  }
+
 
   void _login() async {
     if (!_formKey.currentState!.validate()) return;
@@ -400,6 +423,15 @@ class _LoginPageState extends State<LoginPage> {
         email: email,
         password: _passwordController.text.trim(),
       );
+
+      final prefs = await SharedPreferences.getInstance();
+      if (_rememberMe) {
+        await prefs.setBool('remember_me', true);
+        await prefs.setString('saved_username', _usernameController.text.trim());
+      } else {
+        await prefs.remove('remember_me');
+        await prefs.remove('saved_username');
+      }
 
       // Pasul 4: Navigare
       Navigator.pushReplacement(
@@ -505,6 +537,20 @@ class _LoginPageState extends State<LoginPage> {
                       },
                     ),
                     const SizedBox(height: 24.0),
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _rememberMe,
+                          onChanged: (value) {
+                            setState(() {
+                              _rememberMe = value!;
+                            });
+                          },
+                        ),
+                        const Text('Remember Me'),
+                      ],
+                    ),
+                    const SizedBox(height: 12.0),
                     ElevatedButton(
                       onPressed: _isLoading ? null : _login,
                       style: ElevatedButton.styleFrom(
@@ -561,7 +607,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-// ------------------- PAGINA PRINCIPALĂ (CU TOATE CORECȚIILE) -------------------
+// ------------------- PAGINA PRINCIPALĂ (CU LOGICĂ DE BUFFER) -------------------
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
   final String title;
@@ -578,202 +624,232 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // --- Variabile pentru controlul BLE ---
   BluetoothCharacteristic? writeCharacteristic;
-  StreamSubscription? _characteristicSubscription; // Pentru a asculta date
+  StreamSubscription? _characteristicSubscription;
   final Guid serviceUuid = Guid("0000ffe0-0000-1000-8000-00805f9b34fb");
   final Guid characteristicUuid = Guid("0000ffe1-0000-1000-8000-00805f9b34fb");
 
-  // --- Variabile de Stare (Becul ȘI Modul) ---
+  // --- Variabile de Stare (NOI) ---
   bool _esteBeculAprins = false;
-  bool _esteModulAuto = false;
+  bool _esteModMiscare = false; // NOU: Senzor Ultrasonic
+  bool _esteModLumina = true;   // NOU: Senzor LDR (Adaptiv)
+  bool _esteModAlarma = false;
 
-  // --- Variabilă pentru a ști dacă permisiunile sunt gata ---
+  // --- Variabilă pentru permisiuni ---
   bool _permissionsGranted = false;
 
+  // --- Variabile pentru senzori ---
+  String _currentTemperature = "--";
+  String _currentHumidity = "--";
 
-  // --- Funcție care rulează la început ---
+  // --- Buffer pentru datele primite ---
+  String _bleDataBuffer = "";
+
+  // Variabile pentru setarea temperaturii
+  double _targetHeatTemp = 20.0;
+  double _targetCoolTemp = 26.0;
+
+  final TextEditingController _heatController = TextEditingController();
+  final TextEditingController _coolController = TextEditingController();
+
+
   @override
   void initState() {
     super.initState();
     _checkPermissions();
+    _loadTempSettings();
   }
 
-  // --- Funcție care cere permisiunile ---
   Future<void> _checkPermissions() async {
     if (Platform.isAndroid) {
       var bluetoothScanStatus = await Permission.bluetoothScan.request();
       var bluetoothConnectStatus = await Permission.bluetoothConnect.request();
       var locationStatus = await Permission.location.request();
 
-      if (bluetoothScanStatus.isGranted &&
-          bluetoothConnectStatus.isGranted &&
-          locationStatus.isGranted) {
-        setState(() {
-          _permissionsGranted = true;
-        });
+      if (bluetoothScanStatus.isGranted && bluetoothConnectStatus.isGranted && locationStatus.isGranted) {
+        setState(() => _permissionsGranted = true);
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Permisiunile de Bluetooth și Locație sunt necesare pentru a scana.'),
-              backgroundColor: Colors.red,
-            )
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Permisiuni necesare!'), backgroundColor: Colors.red));
       }
     } else {
-      // Pentru iOS, presupunem că sunt ok deocamdată
+      setState(() => _permissionsGranted = true);
+    }
+  }
+
+  Future<void> _loadTempSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
       setState(() {
-        _permissionsGranted = true;
+        _targetHeatTemp = prefs.getDouble('saved_heat_temp') ?? 20.0;
+        _targetCoolTemp = prefs.getDouble('saved_cool_temp') ?? 26.0;
+        _heatController.text = _targetHeatTemp.toString();
+        _coolController.text = _targetCoolTemp.toString();
       });
     }
   }
 
-
   @override
   void dispose() {
-    // Anulăm abonamentele și ne deconectăm
     _characteristicSubscription?.cancel();
     connectionSubscription?.cancel();
-    connectedDevice?.disconnect(); // Trimitem comanda de deconectare
+    connectedDevice?.disconnect();
     super.dispose();
   }
 
   void _handleConnectionError(dynamic e) {
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Eroare la conectare: $e'), backgroundColor: Colors.red)
-    );
-    _cleanupConnectionState(); // Curățăm starea
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Eroare: $e'), backgroundColor: Colors.red));
+    _cleanupConnectionState();
   }
 
-  // --- Funcția de trimitere comenzi (CU CORECȚIA PENTRU EROARE) ---
   Future<void> _sendCommand(String command) async {
-    if (writeCharacteristic == null) {
-      print('Caracteristica de scris nu e gata.');
-      return;
-    }
+    if (writeCharacteristic == null) return;
     try {
       List<int> bytes = (command + '\n').codeUnits;
-
-      // --- CORECȚIE AICI ---
-      // Am scos ", withoutResponse: true"
       await writeCharacteristic!.write(bytes);
-
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Eroare la trimiterea comenzii: $e'), backgroundColor: Colors.red)
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Eroare comanda: $e'), backgroundColor: Colors.red));
     }
   }
 
-  // --- Funcție care procesează datele primite de la Arduino ---
-  void _handleArduinoData(String data) {
-    if (data.isEmpty) return;
+  void _onDataReceived(String data) {
+    _bleDataBuffer += data;
+    while (_bleDataBuffer.contains('\n')) {
+      int newlineIndex = _bleDataBuffer.indexOf('\n');
+      String completeMessage = _bleDataBuffer.substring(0, newlineIndex);
+      _bleDataBuffer = _bleDataBuffer.substring(newlineIndex + 1);
+      completeMessage = completeMessage.trim();
 
-    print("Primit de la Arduino: $data"); // PENTRU DEBUG
-
-    // Uneori Arduino poate trimite mai multe mesaje odată (ex: "STATUS,BEC,1\nSTATUS,MOD,0")
-    List<String> messages = data.split(RegExp(r'[\r\n]+'));
-
-    // Folosim un 'for' în caz că vin mesaje lipite
-    for (var msg in messages) {
-      if (msg.isEmpty) continue;
-
-      if (msg.startsWith("STATUS,BEC,")) {
-        String val = msg.substring(11); // Ia ce e după "STATUS,BEC,"
-        setState(() { _esteBeculAprins = (val == "1"); });
-      }
-      else if (msg.startsWith("STATUS,MOD,")) {
-        String val = msg.substring(11); // Ia ce e după "STATUS,MOD,"
-        setState(() { _esteModulAuto = (val == "1"); });
+      if (completeMessage.isNotEmpty) {
+        if (kDebugMode) print("RX: '$completeMessage'");
+        _handleCompleteLine(completeMessage);
       }
     }
   }
 
-  // --- Funcția de descoperire servicii ---
+  // --- PARSER ACTUALIZAT PENTRU 2 MODURI ---
+  void _handleCompleteLine(String msg) {
+
+    // 1. Senzori
+    if (msg.startsWith("DATA,T=")) {
+      try {
+        int indexT = msg.indexOf("T=");
+        int indexH = msg.indexOf(",H=");
+        if (indexT != -1 && indexH != -1) {
+          String tempPart = msg.substring(indexT + 2, indexH);
+          String humidPart = msg.substring(indexH + 3);
+
+          if (mounted) {
+            setState(() {
+              _currentTemperature = tempPart;
+              _currentHumidity = humidPart;
+            });
+
+            // Logica automată termostat (Rulează în app)
+            double? currentTempVal = double.tryParse(tempPart);
+            if (currentTempVal != null) {
+              // Poți adăuga aici logica de termostat dacă vrei să fie controlată de telefon
+              // De exemplu: if (currentTempVal < _targetHeatTemp) _sendCommand("HEAT,ON");
+            }
+          }
+        }
+      } catch (e) {
+        print("Eroare parsare DATA: $e");
+      }
+    }
+
+    // 2. Status Bec Manual
+    else if (msg.startsWith("STATUS,BEC,")) {
+      String val = msg.substring(11);
+      if (mounted) setState(() => _esteBeculAprins = (val == "1"));
+    }
+
+    // 3. Status Moduri -> STATUS,MODS,miscare,lumina,alarma
+    else if (msg.startsWith("STATUS,MODS,")) {
+      try {
+        List<String> parts = msg.split(',');
+        // parts[0]="STATUS", parts[1]="MODS", parts[2]="miscare", parts[3]="lumina", parts[4]="alarma"
+
+        if (parts.length >= 5) {
+          if (mounted) {
+            setState(() {
+              // Folosim .trim() pentru a elimina spațiile sau caracterele ascunse (\r)
+              _esteModMiscare = (parts[2].trim() == "1");
+              _esteModLumina = (parts[3].trim() == "1");
+              _esteModAlarma = (parts[4].trim() == "1"); // Aici era problema probabil
+            });
+            print("Status Actualizat: Alarma este ${_esteModAlarma ? 'ON' : 'OFF'}");
+          }
+        }
+      } catch (e) {
+        print("Eroare parsare MODS: $e");
+      }
+    }
+  }
+
   Future<void> _discoverServices(BluetoothDevice device) async {
     try {
+      // Mărim MTU pentru stabilitate
+      try { await device.requestMtu(512); } catch (e) { print("MTU err: $e"); }
+
       List<BluetoothService> services = await device.discoverServices();
+      BluetoothCharacteristic? bestCharacteristic;
 
-      // Căutăm serviciul nostru specific (FFE0)
-      BluetoothService? targetService;
       for (var service in services) {
-        if (service.uuid == serviceUuid) {
-          targetService = service;
-          break;
+        for (var char in service.characteristics) {
+          if (char.properties.notify) bestCharacteristic = char;
+          if (char.uuid.toString().contains("ffe1")) bestCharacteristic = char;
         }
       }
-      if (targetService == null) throw 'Serviciul BLE (FFE0) nu a fost găsit.';
 
-      // Căutăm caracteristica noastră specifică (FFE1)
-      BluetoothCharacteristic? targetCharacteristic;
-      for (var char in targetService.characteristics) {
-        if (char.uuid == characteristicUuid) {
-          targetCharacteristic = char;
-          break;
-        }
-      }
-      if (targetCharacteristic == null) throw 'Caracteristica BLE (FFE1) nu a fost găsită.';
+      if (bestCharacteristic == null) throw 'No Notify Characteristic found.';
 
-      setState(() {
-        writeCharacteristic = targetCharacteristic;
-      });
+      setState(() => writeCharacteristic = bestCharacteristic);
 
-      // Abonează-te la notificări
-      final canNotify = targetCharacteristic.properties.notify;
-      if (canNotify) {
-        await targetCharacteristic.setNotifyValue(true);
+      await bestCharacteristic!.setNotifyValue(true);
+      await Future.delayed(const Duration(milliseconds: 500));
 
-        _characteristicSubscription?.cancel(); // Anulează orice ascultare veche
-
-        _characteristicSubscription = targetCharacteristic.lastValueStream.listen((value) {
-          String dataDeLaArduino = String.fromCharCodes(value);
-          _handleArduinoData(dataDeLaArduino.trim());
-        }, onError: (e) {
-          print("Eroare la ascultare: $e");
-          _handleConnectionError("Eroare la ascultarea datelor BLE.");
-        });
-      }
+      await _characteristicSubscription?.cancel();
+      _characteristicSubscription = bestCharacteristic.lastValueStream.listen((value) {
+        _onDataReceived(String.fromCharCodes(value));
+      }, onError: (e) => print("Stream error: $e"));
 
     } catch (e) {
       _handleConnectionError(e);
     }
   }
 
-  // --- Funcție separată pentru curățarea stării ---
   void _cleanupConnectionState() {
     _characteristicSubscription?.cancel();
     connectionSubscription?.cancel();
     _characteristicSubscription = null;
     connectionSubscription = null;
+    _bleDataBuffer = "";
+
     setState(() {
       connectedDevice = null;
       connectionState = BluetoothConnectionState.disconnected;
       writeCharacteristic = null;
       _esteBeculAprins = false;
-      _esteModulAuto = false;
+      _esteModMiscare = false;
+      _esteModLumina = true;
+      _currentTemperature = "--";
+      _currentHumidity = "--";
     });
   }
 
-  // --- Funcția de CONECTARE ---
   void _connectToDevice(BluetoothDevice device) async {
     FlutterBluePlus.stopScan();
     setState(() {
       connectedDevice = device;
       connectionState = BluetoothConnectionState.connecting;
-      writeCharacteristic = null;
     });
 
     connectionSubscription = device.connectionState.listen((state) {
-      setState(() { connectionState = state; });
-      if (state == BluetoothConnectionState.disconnected) {
-        _cleanupConnectionState();
-      }
-    }, onError: (e) {
-      _handleConnectionError(e);
+      setState(() => connectionState = state);
+      if (state == BluetoothConnectionState.disconnected) _cleanupConnectionState();
     });
 
     try {
       await device.connect(timeout: const Duration(seconds: 15));
-      await Future.delayed(const Duration(milliseconds: 500)); // Pauză de stabilizare
-
       if (connectionState == BluetoothConnectionState.connected) {
         await _discoverServices(device);
       }
@@ -782,87 +858,36 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  // --- Funcția de DECONECTARE ---
   void _disconnectFromDevice() {
     connectedDevice?.disconnect();
     _cleanupConnectionState();
   }
 
-  // --- Funcțiile de Scanare ---
   void scanDevices() {
     if (!_permissionsGranted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Acordă permisiunile de Locație și Bluetooth mai întâi.'),
-            backgroundColor: Colors.red,
-          )
-      );
-      _checkPermissions(); // Cere-le din nou
+      _checkPermissions();
       return;
     }
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
   }
-  void stopScan() { FlutterBluePlus.stopScan(); }
 
-  // --- Widget-ul: Interfața Bluetooth OPRIT ---
-  Widget _buildBluetoothOffUI() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.bluetooth_disabled, size: 80, color: Colors.grey.shade600),
-          const SizedBox(height: 16),
-          const Text('Bluetooth este Oprit', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          Text(
-            'Te rog pornește Bluetooth-ul.',
-            style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
+  void stopScan() {
+    FlutterBluePlus.stopScan();
   }
 
-  // --- Widget-ul: Interfața de SCANARE ---
-  Widget _buildScanUI() {
-    if (!_permissionsGranted) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.lock_outline, size: 80, color: Colors.grey.shade600),
-              const SizedBox(height: 16),
-              const Text('Permisiuni Necsare', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(
-                'Aplicația are nevoie de permisiuni de "Locație" și "Dispozitive din apropiere" pentru a scana după module BLE.',
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                  onPressed: _checkPermissions,
-                  child: const Text('Acordă Permisiunile')
-              )
-            ],
-          ),
-        ),
-      );
-    }
+  // --- UI BUILDERS ---
 
-    // Altfel, arată interfața de scanare normală
+  Widget _buildBluetoothOffUI() {
+    return const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.bluetooth_disabled, size: 80, color: Colors.grey), Text('Bluetooth Oprit', style: TextStyle(fontSize: 20))]));
+  }
+
+  Widget _buildScanUI() {
     return Column(
       children: [
         StreamBuilder<bool>(
           stream: FlutterBluePlus.isScanning,
           initialData: false,
-          builder: (c, snapshot) {
-            final isScanning = snapshot.data ?? false;
-            return isScanning ? const LinearProgressIndicator() : Container();
-          },
+          builder: (c, snapshot) => (snapshot.data ?? false) ? const LinearProgressIndicator() : Container(),
         ),
         Expanded(
           child: StreamBuilder<List<ScanResult>>(
@@ -870,21 +895,14 @@ class _MyHomePageState extends State<MyHomePage> {
             initialData: const [],
             builder: (c, snapshot) {
               final results = snapshot.data ?? [];
-              if (results.isEmpty) {
-                return const Center(
-                  child: Text('Niciun dispozitiv BLE găsit. Apasă butonul pentru a scana.'),
-                );
-              }
+              if (results.isEmpty) return const Center(child: Text('Niciun dispozitiv găsit.'));
               return ListView.builder(
                 itemCount: results.length,
                 itemBuilder: (context, index) {
                   ScanResult r = results[index];
-                  String deviceName = r.device.platformName.isNotEmpty
-                      ? r.device.platformName
-                      : 'Dispozitiv Necunoscut';
-
+                  String name = r.device.platformName.isNotEmpty ? r.device.platformName : 'Necunoscut';
                   return ListTile(
-                    title: Text(deviceName),
+                    title: Text(name),
                     subtitle: Text(r.device.remoteId.toString()),
                     leading: const Icon(Icons.bluetooth),
                     trailing: Text('${r.rssi} dBm'),
@@ -899,140 +917,228 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Widget-ul: Interfața pentru dispozitivul CONECTAT ---
   Widget _buildConnectedDeviceUI() {
-    String deviceName = connectedDevice!.platformName.isNotEmpty
-        ? connectedDevice!.platformName
-        : 'Dispozitiv Necunoscut';
-
-    bool isConnecting = (connectionState == BluetoothConnectionState.connecting);
+    String deviceName = connectedDevice!.platformName.isNotEmpty ? connectedDevice!.platformName : 'Dispozitiv';
     bool isReady = (connectionState == BluetoothConnectionState.connected) && (writeCharacteristic != null);
+
+    if (!isReady) return const Center(child: CircularProgressIndicator());
 
     return SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 16),
-            Text(isReady ? 'Conectat la:' : (isConnecting ? 'Se conectează la:' : 'Eroare la conectare'),
-                style: const TextStyle(fontSize: 22), textAlign: TextAlign.center),
-            const SizedBox(height: 8),
-            Text(deviceName,
-                style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+            Text('Conectat la: $deviceName', textAlign: TextAlign.center, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 24),
 
-            if (isConnecting)
-              const Center(child: CircularProgressIndicator()),
+            // --- SENZORI ---
+            Row(
+              children: [
+                Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.thermostat, color: Colors.red), Text('$_currentTemperature °C', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+                const SizedBox(width: 16),
+                Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.water_drop, color: Colors.blue), Text('$_currentHumidity %', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+              ],
+            ),
 
-            if (connectionState == BluetoothConnectionState.connected && writeCharacteristic == null && !isConnecting)
-              const Center(
-                child: Text('Conectat, dar nu am putut găsi serviciul de control (FFE1).',
-                    style: TextStyle(fontSize: 16, color: Colors.red), textAlign: TextAlign.center),
-              ),
+            const SizedBox(height: 16),
 
-            // ----- AICI ESTE PANOU DE CONTROL -----
-            if (isReady)
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('Panou de Control:',
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
-                  const SizedBox(height: 24),
-
-                  // --- Controlul Modului Auto ---
-                  Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      color: _esteModulAuto ? Colors.blue.shade100 : Colors.grey.shade200,
+            // --- CARD SETĂRI TERMOSTAT ---
+            Card(
+              elevation: 2,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    const Text('Setări Termostat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _heatController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Minim Încălzire (°C)', border: OutlineInputBorder(), prefixIcon: Icon(Icons.local_fire_department, color: Colors.red)),
                     ),
-                    child: SwitchListTile(
-                      title: Text(
-                        _esteModulAuto ? 'Mod Auto Activat' : 'Mod Auto Oprit',
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: const Text('Controlat de senzor/butonul fizic'),
-                      value: _esteModulAuto,
-
-                      // --- CORECȚIE AICI (Fără setState) ---
-                      onChanged: (newValue) {
-                        if (newValue) {
-                          _sendCommand("MOD,AUTO,ON");
-                        } else {
-                          _sendCommand("MOD,AUTO,OFF");
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _coolController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Maxim Răcire (°C)', border: OutlineInputBorder(), prefixIcon: Icon(Icons.ac_unit, color: Colors.blue)),
+                    ),
+                    const SizedBox(height: 10),
+                    ElevatedButton.icon(
+                      onPressed: () async {
+                        double? h = double.tryParse(_heatController.text);
+                        double? c = double.tryParse(_coolController.text);
+                        if (h != null && c != null) {
+                          setState(() { _targetHeatTemp = h; _targetCoolTemp = c; });
+                          final prefs = await SharedPreferences.getInstance();
+                          prefs.setDouble('saved_heat_temp', h);
+                          prefs.setDouble('saved_cool_temp', c);
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Salvat!'), backgroundColor: Colors.green));
+                          FocusScope.of(context).unfocus();
                         }
-                        // AM ȘTERS setState de aici
                       },
-
-                      secondary: Icon(
-                        _esteModulAuto ? Icons.sensors : Icons.sensors_off,
-                        size: 40,
-                        color: _esteModulAuto ? Colors.blue : Colors.grey,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // --- Controlul Manual ---
-                  Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      color: _esteBeculAprins ? Colors.yellow.shade100 : Colors.grey.shade200,
-                      border: Border.all(
-                          color: _esteModulAuto ? Colors.grey.shade400 : Colors.transparent,
-                          width: 1
-                      ),
-                    ),
-                    child: SwitchListTile(
-                      title: Text(
-                        _esteBeculAprins ? 'Becul este Aprins' : 'Becul este Stins',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: _esteModulAuto ? Colors.grey.shade600 : Colors.black,
-                        ),
-                      ),
-                      subtitle: Text(
-                        _esteModulAuto ? 'Dezactivați Modul Auto pentru control' : 'Control manual',
-                        style: TextStyle(
-                          color: _esteModulAuto ? Colors.grey.shade600 : Colors.black54,
-                        ),
-                      ),
-                      value: _esteBeculAprins,
-
-                      // --- CORECȚIE AICI (Fără setState) ---
-                      onChanged: _esteModulAuto ? null : (newValue) {
-                        if (newValue) {
-                          _sendCommand("BEC,ON");
-                        } else {
-                          _sendCommand("BEC,OFF");
-                        }
-                        // AM ȘTERS setState de aici
-                      },
-
-                      secondary: Icon(
-                        _esteBeculAprins ? Icons.lightbulb : Icons.lightbulb_outline,
-                        size: 40,
-                        color: _esteBeculAprins ? Colors.orange : Colors.grey,
-                      ),
-                    ),
-                  ),
-                ],
+                      icon: const Icon(Icons.save),
+                      label: const Text('Salvează'),
+                    )
+                  ],
+                ),
               ),
+            ),
 
-            const SizedBox(height: 48),
+            const SizedBox(height: 24),
+            const Divider(thickness: 1.0),
+            const SizedBox(height: 16),
 
-            // Butonul de deconectare
+            // --- NOU: SECȚIUNE AUTOMATIZĂRI (2 Moduri) ---
+            const Text('Automatizări Casă', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+
+            // 1. SWITCH SENZOR MIȘCARE
+            Card(
+              elevation: 3,
+              color: _esteModMiscare ? Colors.green.shade50 : Colors.white,
+              child: SwitchListTile(
+                title: const Text('Senzor Mișcare (PIR)', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Aprinde becul automat la prezență'),
+                value: _esteModMiscare,
+                activeColor: Colors.green,
+                secondary: Icon(Icons.motion_photos_on, color: _esteModMiscare ? Colors.green : Colors.grey),
+                onChanged: (val) {
+                  // Trimitem comanda
+                  _sendCommand(val ? "MOD,MISCARE,ON" : "MOD,MISCARE,OFF");
+                  // Updatam UI optimist
+                  setState(() => _esteModMiscare = val);
+                },
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            // 2. SWITCH ILUMINAT ADAPTIV
+            Card(
+              elevation: 3,
+              color: _esteModLumina ? Colors.blue.shade50 : Colors.white,
+              child: SwitchListTile(
+                title: const Text('Iluminat Adaptiv (LDR)', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Reglează intensitatea în funcție de lumina din cameră'),
+                value: _esteModLumina,
+                activeColor: Colors.blue,
+                secondary: Icon(Icons.brightness_auto, color: _esteModLumina ? Colors.blue : Colors.grey),
+                onChanged: (val) {
+                  _sendCommand(val ? "MOD,LUMINA,ON" : "MOD,LUMINA,OFF");
+                  setState(() => _esteModLumina = val);
+                },
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // 3. SWITCH ALARMĂ (NOU)
+            Card(
+              elevation: 3,
+              // O facem roșiatică dacă e armată, ca să iasă în evidență
+              color: _esteModAlarma ? Colors.red.shade50 : Colors.white,
+              child: SwitchListTile(
+                title: const Text('Sistem Alarmă', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Monitorizare intruși (Ultrasonic)'),
+                value: _esteModAlarma,
+                activeColor: Colors.red,
+                secondary: Icon(Icons.security, color: _esteModAlarma ? Colors.red : Colors.grey),
+                onChanged: (val) {
+                  // Trimitem comanda specifică pentru Alarmă
+                  _sendCommand(val ? "ALARMA,ARM" : "ALARMA,DISARM");
+                  setState(() => _esteModAlarma = val);
+                },
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            Card(
+              elevation: 2,
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Securitate', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: TextEditingController(), // Folosim controller temporar sau declară unul sus
+                            decoration: const InputDecoration(
+                              labelText: 'Parolă nouă',
+                              hintText: 'ex: 1234',
+                              border: OutlineInputBorder(),
+                              contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                            ),
+                            keyboardType: TextInputType.number,
+                            onSubmitted: (val) {
+                              if(val.isNotEmpty) {
+                                _sendCommand("PASS,$val");
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Parolă actualizată!')));
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        IconButton(
+                          icon: const Icon(Icons.send, color: Colors.blue),
+                          onPressed: () {
+                            // Notă: Pentru un cod complet curat, declară un controller sus în clasă:
+                            // final _passController = TextEditingController();
+                            // și folosește-l aici.
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Scrie parola și apasă Enter pe tastatură')));
+                          },
+                        )
+                      ],
+                    ),
+                    const Text('Tastează codul + # pe tastatura fizică pentru a arma/dezarma.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // --- CONTROL MANUAL ---
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: _esteModMiscare ? Colors.grey.shade200 : (_esteBeculAprins ? Colors.yellow.shade100 : Colors.white),
+                border: Border.all(color: Colors.orange.withOpacity(0.5)),
+              ),
+              child: SwitchListTile(
+                title: Text(_esteBeculAprins ? 'Bec APRINS' : 'Bec STINS', style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text(_esteModMiscare ? 'Dezactivat de Senzorul de Mișcare' : 'Control Manual'),
+                value: _esteBeculAprins,
+                // Dezactivăm butonul dacă Senzorul de Mișcare e pornit (pentru a evita conflictul)
+                onChanged: _esteModMiscare ? null : (val) {
+                  _sendCommand(val ? "BEC,ON" : "BEC,OFF");
+                  setState(() => _esteBeculAprins = val);
+                },
+                secondary: Icon(Icons.lightbulb, color: _esteBeculAprins ? Colors.orange : Colors.grey),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+            const Divider(thickness: 1.0),
+
+            // --- BUTON RGB ---
+            ElevatedButton.icon(
+              icon: const Icon(Icons.palette),
+              label: const Text('Control LED RGB'),
+              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (c) => RgbControlPage(sendCommand: _sendCommand))),
+            ),
+
+            const SizedBox(height: 40),
             ElevatedButton(
-              onPressed: _disconnectFromDevice,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-              ),
-              child: const Text('Deconectare', style: TextStyle(fontSize: 16)),
+                onPressed: _disconnectFromDevice,
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                child: const Text('Deconectare')
             ),
           ],
         ),
@@ -1040,88 +1146,103 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // --- Widget-ul: Butonul de scanare ---
-  Widget _buildScanButton() {
-    return StreamBuilder<bool>(
-      stream: FlutterBluePlus.isScanning,
-      initialData: false,
-      builder: (c, snapshot) {
-        final isScanning = snapshot.data ?? false;
-        if (isScanning) {
-          return FloatingActionButton(
-            onPressed: stopScan,
-            tooltip: 'Stop Scan',
-            backgroundColor: Colors.red,
-            child: const Icon(Icons.stop),
-          );
-        } else {
-          return FloatingActionButton(
-            onPressed: scanDevices,
-            tooltip: 'Start Scan',
-            child: const Icon(Icons.search),
-          );
-        }
-      },
-    );
-  }
-
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
             onPressed: () {
-              if (connectedDevice != null) {
-                _disconnectFromDevice();
-              }
+              _disconnectFromDevice();
               FirebaseAuth.instance.signOut();
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (context) => const LoginPage()),
-              );
+              Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => const LoginPage()));
             },
           )
         ],
       ),
-
-      // --- Corpul paginii ---
       body: StreamBuilder<BluetoothAdapterState>(
         stream: FlutterBluePlus.adapterState,
         initialData: BluetoothAdapterState.unknown,
-        builder: (context, snapshot) {
-          final state = snapshot.data;
-          if (state != BluetoothAdapterState.on) {
-            return _buildBluetoothOffUI();
-          }
-          if (connectedDevice != null) {
-            return _buildConnectedDeviceUI();
-          }
+        builder: (c, snapshot) {
+          if (snapshot.data != BluetoothAdapterState.on) return _buildBluetoothOffUI();
+          if (connectedDevice != null) return _buildConnectedDeviceUI();
           return _buildScanUI();
         },
       ),
-
-      // --- Butonul de scanare ---
       floatingActionButton: StreamBuilder<BluetoothAdapterState>(
         stream: FlutterBluePlus.adapterState,
         initialData: BluetoothAdapterState.unknown,
-        builder: (context, snapshot) {
-          if (snapshot.data == BluetoothAdapterState.on && connectedDevice == null) {
-            return _buildScanButton();
-          }
-          return Container();
-        },
+        builder: (c, snapshot) => (snapshot.data == BluetoothAdapterState.on && connectedDevice == null)
+            ? FloatingActionButton(onPressed: () { if(FlutterBluePlus.isScanningNow) stopScan(); else scanDevices(); }, child: Icon(FlutterBluePlus.isScanningNow ? Icons.stop : Icons.search))
+            : Container(),
       ),
     );
   }
 }
 
-// ------------------- PAGINA RESET PASSWORD (Pentru Deep Link) -------------------
+// ------------------- PAGINA LED RGB -------------------
+class RgbControlPage extends StatefulWidget {
+  final Function(String) sendCommand;
+  const RgbControlPage({super.key, required this.sendCommand});
+
+  @override
+  State<RgbControlPage> createState() => _RgbControlPageState();
+}
+
+class _RgbControlPageState extends State<RgbControlPage> {
+  Color _currentColor = Colors.blue;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Control LED RGB')),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ColorPicker(
+                pickerColor: _currentColor,
+                onColorChanged: (c) => setState(() => _currentColor = c),
+                pickerAreaHeightPercent: 0.8,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => widget.sendCommand("RGB,SET,${_currentColor.red},${_currentColor.green},${_currentColor.blue}"),
+                child: const Text('Setează Culoarea'),
+              ),
+              const SizedBox(height: 24),
+              const Divider(),
+              const Text('Presetări', textAlign: TextAlign.center, style: TextStyle(fontSize: 18)),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                children: [
+                  ElevatedButton(onPressed: () => widget.sendCommand("RGB,PRESET,ZI"), child: const Text('Zi')),
+                  ElevatedButton(onPressed: () => widget.sendCommand("RGB,PRESET,CALD"), child: const Text('Cald')),
+                  ElevatedButton(onPressed: () => widget.sendCommand("RGB,PRESET,RECE"), child: const Text('Rece')),
+                  ElevatedButton(onPressed: () => widget.sendCommand("RGB,PRESET,CINEMA"), child: const Text('Cinema')),
+                ],
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                onPressed: () => widget.sendCommand("RGB,OFF"),
+                child: const Text('Stinge LED RGB'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ------------------- PAGINA RESET PASSWORD -------------------
 class ResetPasswordPage extends StatefulWidget {
   final String oobCode;
   const ResetPasswordPage({super.key, required this.oobCode});
@@ -1132,123 +1253,37 @@ class ResetPasswordPage extends StatefulWidget {
 
 class _ResetPasswordPageState extends State<ResetPasswordPage> {
   final _formKey = GlobalKey<FormState>();
-  final _newPasswordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
-  bool _isLoading = false;
+  final _passCtrl = TextEditingController();
+  final _confCtrl = TextEditingController();
+  bool _loading = false;
 
-  @override
-  void dispose() {
-    _newPasswordController.dispose();
-    _confirmPasswordController.dispose();
-    super.dispose();
-  }
-
-  void _confirmReset() async {
+  void _confirm() async {
     if (!_formKey.currentState!.validate()) return;
-    setState(() { _isLoading = true; });
-
+    setState(() => _loading = true);
     try {
-      // Confirmă noua parolă folosind codul din link
-      await FirebaseAuth.instance.confirmPasswordReset(
-        code: widget.oobCode,
-        newPassword: _newPasswordController.text.trim(),
-      );
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Parola a fost schimbată! Te poți loga acum.'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      // Trimite utilizatorul la pagina de login și șterge istoricul
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (context) => const LoginPage()),
-            (route) => false,
-      );
-
-    } on FirebaseAuthException catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message ?? 'A apărut o eroare.'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      await FirebaseAuth.instance.confirmPasswordReset(code: widget.oobCode, newPassword: _passCtrl.text.trim());
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Parolă schimbată!')));
+      Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const LoginPage()), (r) => false);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('A apărut o eroare neașteptată.'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Eroare: $e')));
     }
-    setState(() { _isLoading = false; });
+    setState(() => _loading = false);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Setează Parola Nouă'),
-        backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-      ),
+      appBar: AppBar(title: const Text('Setează Parola Nouă')),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         child: Form(
           key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              const SizedBox(height: 16),
-              const Text(
-                'Introdu noua ta parolă. Aceasta trebuie să aibă cel puțin 6 caractere.',
-                style: TextStyle(fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              TextFormField(
-                controller: _newPasswordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Parolă Nouă',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.lock),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) return 'Te rog introdu o parolă';
-                  if (value.length < 6) return 'Parola trebuie să aibă minim 6 caractere';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _confirmPasswordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Confirmă Parola Nouă',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.lock_outline),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) return 'Te rog confirmă parola';
-                  if (value != _newPasswordController.text) return 'Parolele nu se potrivesc';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: _isLoading ? null : _confirmReset,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16.0),
-                  textStyle: const TextStyle(fontSize: 16),
-                ),
-                child: _isLoading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text('Salvează Parola'),
-              ),
-            ],
-          ),
+          child: Column(children: [
+            TextFormField(controller: _passCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Noua Parolă')),
+            TextFormField(controller: _confCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Confirmă')),
+            const SizedBox(height: 20),
+            ElevatedButton(onPressed: _loading ? null : _confirm, child: const Text('Salvează')),
+          ]),
         ),
       ),
     );
