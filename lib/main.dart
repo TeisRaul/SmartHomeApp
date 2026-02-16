@@ -1,33 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-
-// Importurile Firebase
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'firebase_options.dart'; // Fișierul generat de 'flutterfire configure'
+import 'firebase_options.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-// Importul pentru Bluetooth
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/foundation.dart';
 
-// Import necesar pentru StreamSubscription
 import 'dart:async';
 
-// Import pentru permisiuni
 import 'package:permission_handler/permission_handler.dart';
-import 'dart:io' show Platform; // Pentru a verifica dacă e Android
+import 'dart:io' show Platform;
 
-// --- IMPORT NOU PENTRU ROATA DE CULORI ---
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 
 void main() async {
-  // Asigură inițializarea înainte de a rula Firebase
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Inițializează Firebase
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
@@ -35,7 +27,6 @@ void main() async {
   runApp(const MyApp());
 }
 
-// ------------------- ROOT WIDGET -------------------
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -53,7 +44,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// ------------------- PAGINA SIGN UP -------------------
 class SignUpPage extends StatefulWidget {
   const SignUpPage({super.key});
 
@@ -81,7 +71,8 @@ class _SignUpPageState extends State<SignUpPage> {
     );
     if (picked != null) {
       setState(() {
-        _dobController.text = "${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}";
+        _dobController.text = "${picked.year}-${picked.month.toString().padLeft(2, '0')}-${
+            picked.day.toString().padLeft(2, '0')}";
       });
     }
   }
@@ -91,13 +82,11 @@ class _SignUpPageState extends State<SignUpPage> {
     setState(() { _isLoading = true; });
 
     try {
-      // Pasul 1: Creează utilizatorul în Firebase Auth
       UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
 
-      // Pasul 2: Salvează informațiile suplimentare în Firestore
       if (userCredential.user != null) {
         String uid = userCredential.user!.uid;
         await FirebaseFirestore.instance.collection('users').doc(uid).set({
@@ -124,7 +113,7 @@ class _SignUpPageState extends State<SignUpPage> {
         ),
       );
     } catch (e) {
-      print('A apărut o eroare la scrierea în Firestore: $e'); // Pentru debug
+      print('A apărut o eroare la scrierea în Firestore: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('A apărut o eroare neașteptată la scrierea datelor.'),
@@ -132,7 +121,6 @@ class _SignUpPageState extends State<SignUpPage> {
         ),
       );
     }
-
     setState(() { _isLoading = false; });
   }
 
@@ -258,10 +246,8 @@ class _SignUpPageState extends State<SignUpPage> {
   }
 }
 
-// ------------------- PAGINA FORGOT PASSWORD -------------------
 class ForgetPasswordPage extends StatefulWidget {
   const ForgetPasswordPage({super.key});
-
   @override
   State<ForgetPasswordPage> createState() => _ForgetPasswordState();
 }
@@ -270,17 +256,14 @@ class _ForgetPasswordState extends State<ForgetPasswordPage> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   bool _isLoading = false;
-
   @override
   void dispose() {
     _emailController.dispose();
     super.dispose();
   }
-
   void _sendResetLink() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() { _isLoading = true; });
-
     try {
       await FirebaseAuth.instance.sendPasswordResetEmail(
           email: _emailController.text.trim()
@@ -307,7 +290,6 @@ class _ForgetPasswordState extends State<ForgetPasswordPage> {
         ),
       );
     }
-
     setState(() { _isLoading = false; });
   }
 
@@ -365,10 +347,8 @@ class _ForgetPasswordState extends State<ForgetPasswordPage> {
   }
 }
 
-// ------------------- PAGINA DE LOGIN -------------------
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
-
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
@@ -385,8 +365,6 @@ class _LoginPageState extends State<LoginPage> {
     super.initState();
     _loadUserCredentials();
   }
-
-  // Funcție care verifică dacă există un user salvat
   void _loadUserCredentials() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -397,13 +375,11 @@ class _LoginPageState extends State<LoginPage> {
     });
   }
 
-
   void _login() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() { _isLoading = true; });
 
     try {
-      // Pasul 1: Caută în Firestore username-ul
       final query = await FirebaseFirestore.instance
           .collection('users')
           .where('username', isEqualTo: _usernameController.text.trim())
@@ -414,11 +390,9 @@ class _LoginPageState extends State<LoginPage> {
         throw FirebaseAuthException(code: 'user-not-found');
       }
 
-      // Pasul 2: Extrage email-ul
       final userDoc = query.docs.first;
       final String email = userDoc.data()['email'];
 
-      // Pasul 3: Loghează-te cu email și parolă
       await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: email,
         password: _passwordController.text.trim(),
@@ -432,8 +406,6 @@ class _LoginPageState extends State<LoginPage> {
         await prefs.remove('remember_me');
         await prefs.remove('saved_username');
       }
-
-      // Pasul 4: Navigare
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -607,7 +579,6 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-// ------------------- PAGINA PRINCIPALĂ (CU LOGICĂ DE BUFFER) -------------------
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
   final String title;
@@ -617,40 +588,37 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  // --- Variabilele de conexiune ---
   BluetoothDevice? connectedDevice;
   StreamSubscription<BluetoothConnectionState>? connectionSubscription;
   BluetoothConnectionState connectionState = BluetoothConnectionState.disconnected;
 
-  // --- Variabile pentru controlul BLE ---
   BluetoothCharacteristic? writeCharacteristic;
   StreamSubscription? _characteristicSubscription;
   final Guid serviceUuid = Guid("0000ffe0-0000-1000-8000-00805f9b34fb");
   final Guid characteristicUuid = Guid("0000ffe1-0000-1000-8000-00805f9b34fb");
 
-  // --- Variabile de Stare (NOI) ---
   bool _esteBeculAprins = false;
-  bool _esteModMiscare = false; // NOU: Senzor Ultrasonic
-  bool _esteModLumina = true;   // NOU: Senzor LDR (Adaptiv)
+  bool _esteModMiscare = false;
+  bool _esteModLumina = true;
   bool _esteModAlarma = false;
+  bool _esteUsaDeschisa = false;
 
-  // --- Variabilă pentru permisiuni ---
   bool _permissionsGranted = false;
 
-  // --- Variabile pentru senzori ---
   String _currentTemperature = "--";
   String _currentHumidity = "--";
 
-  // --- Buffer pentru datele primite ---
   String _bleDataBuffer = "";
 
-  // Variabile pentru setarea temperaturii
   double _targetHeatTemp = 20.0;
   double _targetCoolTemp = 26.0;
 
+  String _currentSoilMoisture = "--";
+  bool _isPumpOn = false;
+  bool _isFanOn = false;
+
   final TextEditingController _heatController = TextEditingController();
   final TextEditingController _coolController = TextEditingController();
-
 
   @override
   void initState() {
@@ -725,69 +693,93 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  // --- PARSER ACTUALIZAT PENTRU 2 MODURI ---
   void _handleCompleteLine(String msg) {
-
-    // 1. Senzori
-    if (msg.startsWith("DATA,T=")) {
+    msg = msg.trim();
+    if (kDebugMode) print("DEBUG RX PROCESAT: '$msg'");
+    if (msg.startsWith("DATA")) {
       try {
-        int indexT = msg.indexOf("T=");
-        int indexH = msg.indexOf(",H=");
-        if (indexT != -1 && indexH != -1) {
-          String tempPart = msg.substring(indexT + 2, indexH);
-          String humidPart = msg.substring(indexH + 3);
-
-          if (mounted) {
-            setState(() {
-              _currentTemperature = tempPart;
-              _currentHumidity = humidPart;
-            });
-
-            // Logica automată termostat (Rulează în app)
-            double? currentTempVal = double.tryParse(tempPart);
-            if (currentTempVal != null) {
-              // Poți adăuga aici logica de termostat dacă vrei să fie controlată de telefon
-              // De exemplu: if (currentTempVal < _targetHeatTemp) _sendCommand("HEAT,ON");
-            }
+        List<String> parts = msg.split(',');
+        String tempVal = "--";
+        String humVal = "--";
+        String sol = "--";
+        for (var part in parts) {
+          part = part.trim();
+          if (part.startsWith("T=")) {
+            tempVal = part.substring(2);
+          } else if (part.startsWith("H=")) {
+            humVal = part.substring(2);
+          } else if (part.startsWith("S=")) {
+            sol = part.substring(2);
           }
         }
+        if (mounted) {
+          setState(() {
+            _currentTemperature = tempVal;
+            _currentHumidity = humVal;
+            _currentSoilMoisture = sol;
+          });
+        }
       } catch (e) {
-        print("Eroare parsare DATA: $e");
+        print("Eroare parsare temperatura: $e");
+      }
+    }
+    else if (msg.startsWith("STATUS,POMPA")) {
+      List<String> parts = msg.split(',');
+      if (parts.length >= 3) {
+        if (mounted) setState(() => _isPumpOn = (parts[2].trim() == "1"));
       }
     }
 
-    // 2. Status Bec Manual
-    else if (msg.startsWith("STATUS,BEC,")) {
-      String val = msg.substring(11);
-      if (mounted) setState(() => _esteBeculAprins = (val == "1"));
+    else if (msg.startsWith("STATUS,VENT")) {
+      List<String> parts = msg.split(',');
+      if (parts.length >= 3) {
+        if (mounted) setState(() => _isFanOn = (parts[2].trim() == "1"));
+      }
     }
 
-    // 3. Status Moduri -> STATUS,MODS,miscare,lumina,alarma
-    else if (msg.startsWith("STATUS,MODS,")) {
+    else if (msg.startsWith("STATUS,BEC")) {
       try {
         List<String> parts = msg.split(',');
-        // parts[0]="STATUS", parts[1]="MODS", parts[2]="miscare", parts[3]="lumina", parts[4]="alarma"
+        if (parts.length >= 3) {
+          String val = parts[2].trim();
+          if (mounted) setState(() => _esteBeculAprins = (val == "1"));
+        }
+      } catch (e) {
+        print("Eroare parsare BEC: $e");
+      }
+    }
+    else if (msg.startsWith("STATUS,MODS")) {
+      try {
+        List<String> parts = msg.split(',');
 
         if (parts.length >= 5) {
+          String miscare = parts[2].trim();
+          String lumina = parts[3].trim();
+          String alarma = parts[4].trim();
+
           if (mounted) {
             setState(() {
-              // Folosim .trim() pentru a elimina spațiile sau caracterele ascunse (\r)
-              _esteModMiscare = (parts[2].trim() == "1");
-              _esteModLumina = (parts[3].trim() == "1");
-              _esteModAlarma = (parts[4].trim() == "1"); // Aici era problema probabil
+              _esteModMiscare = (miscare == "1");
+              _esteModLumina = (lumina == "1");
+              _esteModAlarma = (alarma == "1");
             });
-            print("Status Actualizat: Alarma este ${_esteModAlarma ? 'ON' : 'OFF'}");
+            print("UI UPDATED -> Alarma: $_esteModAlarma");
           }
         }
       } catch (e) {
         print("Eroare parsare MODS: $e");
       }
     }
+    else if (msg.startsWith("STATUS,USA")) {
+      List<String> parts = msg.split(',');
+      if (parts.length >= 3) {
+        if (mounted) setState(() => _esteUsaDeschisa = (parts[2].trim() == "1"));
+      }
+    }
   }
 
   Future<void> _discoverServices(BluetoothDevice device) async {
     try {
-      // Mărim MTU pentru stabilitate
       try { await device.requestMtu(512); } catch (e) { print("MTU err: $e"); }
 
       List<BluetoothService> services = await device.discoverServices();
@@ -875,8 +867,6 @@ class _MyHomePageState extends State<MyHomePage> {
     FlutterBluePlus.stopScan();
   }
 
-  // --- UI BUILDERS ---
-
   Widget _buildBluetoothOffUI() {
     return const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.bluetooth_disabled, size: 80, color: Colors.grey), Text('Bluetooth Oprit', style: TextStyle(fontSize: 20))]));
   }
@@ -931,19 +921,38 @@ class _MyHomePageState extends State<MyHomePage> {
           children: [
             Text('Conectat la: $deviceName', textAlign: TextAlign.center, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 24),
-
-            // --- SENZORI ---
             Row(
               children: [
-                Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.thermostat, color: Colors.red), Text('$_currentTemperature °C', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+                Expanded(child: Card(child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                        children: [const Icon(Icons.thermostat, color: Colors.red),
+                          Text('$_currentTemperature °C',
+                              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))]
+                    )))),
                 const SizedBox(width: 16),
-                Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.water_drop, color: Colors.blue), Text('$_currentHumidity %', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))])))),
+                Expanded(child: Card(
+                    child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                            children: [const Icon(
+                                Icons.water_drop, color: Colors.blue),
+                              Text('$_currentHumidity %',
+                                  style: const TextStyle(
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold))]
+                        )))),
+                const SizedBox(width: 16),
               ],
             ),
-
+            const SizedBox(height:16),
+            Row(
+              children: [
+              Expanded(child: Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.grass, color: Colors.green), Text('$_currentSoilMoisture %', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),)])))),
+              const SizedBox(width: 16),
+              ],
+            ),
             const SizedBox(height: 16),
-
-            // --- CARD SETĂRI TERMOSTAT ---
             Card(
               elevation: 2,
               child: Padding(
@@ -984,16 +993,47 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
               ),
             ),
+            
+            const SizedBox(height: 16),
+            const Divider(thickness: 1.0),
+            const SizedBox(height: 16),
+
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: _esteUsaDeschisa ? Colors.green.shade100 : Colors.red.shade50,
+                border: Border.all(color: _esteUsaDeschisa ? Colors.green : Colors.red),
+              ),
+              child: SwitchListTile(
+                title: Text(
+                    _esteUsaDeschisa ? 'Ușă DESCUIATĂ' : 'Ușă ÎNCUIATĂ',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: _esteUsaDeschisa ? Colors.green.shade800 : Colors.red.shade800
+                    )
+                ),
+                subtitle: const Text('Control Acces & Încuietoare'),
+                secondary: Icon(
+                    _esteUsaDeschisa ? Icons.lock_open : Icons.lock,
+                    color: _esteUsaDeschisa ? Colors.green : Colors.red
+                ),
+                value: _esteUsaDeschisa,
+                activeColor: Colors.green,
+                inactiveThumbColor: Colors.red,
+                inactiveTrackColor: Colors.red.shade200,
+                onChanged: (v) {
+                  _sendCommand(v ? "USA,OPEN" : "USA,CLOSE");
+                  setState(() => _esteUsaDeschisa = v);
+                },
+              ),
+            ),
 
             const SizedBox(height: 24),
             const Divider(thickness: 1.0),
             const SizedBox(height: 16),
-
-            // --- NOU: SECȚIUNE AUTOMATIZĂRI (2 Moduri) ---
             const Text('Automatizări Casă', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
             const SizedBox(height: 16),
 
-            // 1. SWITCH SENZOR MIȘCARE
             Card(
               elevation: 3,
               color: _esteModMiscare ? Colors.green.shade50 : Colors.white,
@@ -1004,17 +1044,13 @@ class _MyHomePageState extends State<MyHomePage> {
                 activeColor: Colors.green,
                 secondary: Icon(Icons.motion_photos_on, color: _esteModMiscare ? Colors.green : Colors.grey),
                 onChanged: (val) {
-                  // Trimitem comanda
                   _sendCommand(val ? "MOD,MISCARE,ON" : "MOD,MISCARE,OFF");
-                  // Updatam UI optimist
                   setState(() => _esteModMiscare = val);
                 },
               ),
             ),
 
             const SizedBox(height: 8),
-
-            // 2. SWITCH ILUMINAT ADAPTIV
             Card(
               elevation: 3,
               color: _esteModLumina ? Colors.blue.shade50 : Colors.white,
@@ -1030,13 +1066,9 @@ class _MyHomePageState extends State<MyHomePage> {
                 },
               ),
             ),
-
             const SizedBox(height: 24),
-
-            // 3. SWITCH ALARMĂ (NOU)
             Card(
               elevation: 3,
-              // O facem roșiatică dacă e armată, ca să iasă în evidență
               color: _esteModAlarma ? Colors.red.shade50 : Colors.white,
               child: SwitchListTile(
                 title: const Text('Sistem Alarmă', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -1045,7 +1077,6 @@ class _MyHomePageState extends State<MyHomePage> {
                 activeColor: Colors.red,
                 secondary: Icon(Icons.security, color: _esteModAlarma ? Colors.red : Colors.grey),
                 onChanged: (val) {
-                  // Trimitem comanda specifică pentru Alarmă
                   _sendCommand(val ? "ALARMA,ARM" : "ALARMA,DISARM");
                   setState(() => _esteModAlarma = val);
                 },
@@ -1067,7 +1098,7 @@ class _MyHomePageState extends State<MyHomePage> {
                       children: [
                         Expanded(
                           child: TextField(
-                            controller: TextEditingController(), // Folosim controller temporar sau declară unul sus
+                            controller: TextEditingController(),
                             decoration: const InputDecoration(
                               labelText: 'Parolă nouă',
                               hintText: 'ex: 1234',
@@ -1087,9 +1118,6 @@ class _MyHomePageState extends State<MyHomePage> {
                         IconButton(
                           icon: const Icon(Icons.send, color: Colors.blue),
                           onPressed: () {
-                            // Notă: Pentru un cod complet curat, declară un controller sus în clasă:
-                            // final _passController = TextEditingController();
-                            // și folosește-l aici.
                             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Scrie parola și apasă Enter pe tastatură')));
                           },
                         )
@@ -1103,7 +1131,50 @@ class _MyHomePageState extends State<MyHomePage> {
 
             const SizedBox(height: 24),
 
-            // --- CONTROL MANUAL ---
+            const SizedBox(height: 12),
+
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: _isPumpOn ? Colors.blue.shade100 : Colors.white,
+                border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
+              ),
+              child: SwitchListTile(
+                title: Text(_isPumpOn ? 'Pompă PORNITĂ' : 'Pompă OPRITĂ', style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Control manual irigare'),
+                secondary: Icon(Icons.water, color: _isPumpOn ? Colors.blue : Colors.grey),
+                value: _isPumpOn,
+                activeColor: Colors.blue,
+                onChanged: (v) {
+                  _sendCommand(v ? "POMPA,ON" : "POMPA,OFF");
+                  setState(() => _isPumpOn = v);
+                },
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: _isFanOn ? Colors.blueGrey.shade100 : Colors.white,
+                border: Border.all(color: Colors.blueGrey.withOpacity(0.5)),
+              ),
+              child: SwitchListTile(
+                title: Text(_isFanOn ? 'Ventilator PORNIT' : 'Ventilator OPRIT', style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Control manual ventilație'),
+                secondary: Icon(Icons.wind_power, color: _isFanOn ? Colors.blueGrey : Colors.grey),
+                value: _isFanOn,
+                activeColor: Colors.blueGrey,
+                onChanged: (v) {
+                  _sendCommand(v ? "VENT,ON" : "VENT,OFF");
+                  setState(() => _isFanOn = v);
+                },
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
             Container(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(12),
@@ -1114,7 +1185,6 @@ class _MyHomePageState extends State<MyHomePage> {
                 title: Text(_esteBeculAprins ? 'Bec APRINS' : 'Bec STINS', style: const TextStyle(fontWeight: FontWeight.bold)),
                 subtitle: Text(_esteModMiscare ? 'Dezactivat de Senzorul de Mișcare' : 'Control Manual'),
                 value: _esteBeculAprins,
-                // Dezactivăm butonul dacă Senzorul de Mișcare e pornit (pentru a evita conflictul)
                 onChanged: _esteModMiscare ? null : (val) {
                   _sendCommand(val ? "BEC,ON" : "BEC,OFF");
                   setState(() => _esteBeculAprins = val);
@@ -1126,7 +1196,6 @@ class _MyHomePageState extends State<MyHomePage> {
             const SizedBox(height: 24),
             const Divider(thickness: 1.0),
 
-            // --- BUTON RGB ---
             ElevatedButton.icon(
               icon: const Icon(Icons.palette),
               label: const Text('Control LED RGB'),
@@ -1182,8 +1251,6 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 }
-
-// ------------------- PAGINA LED RGB -------------------
 class RgbControlPage extends StatefulWidget {
   final Function(String) sendCommand;
   const RgbControlPage({super.key, required this.sendCommand});
@@ -1242,7 +1309,6 @@ class _RgbControlPageState extends State<RgbControlPage> {
   }
 }
 
-// ------------------- PAGINA RESET PASSWORD -------------------
 class ResetPasswordPage extends StatefulWidget {
   final String oobCode;
   const ResetPasswordPage({super.key, required this.oobCode});
